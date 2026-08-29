@@ -3,6 +3,15 @@
 > **输入音频 → 输出 `severity_0_100`（0–100，越高=认知障碍越重）+ `risk_band`**。
 > 音频进来后自动走：openSMILE 抽 88 维 eGeMAPS + Whisper ASR 转写 → 组特征 → 评分。不需要再下载任何模型。
 
+> **⚠️ Git LFS 提醒**：本仓库的大文件（Whisper 模型 `speech_mci_detection/whisper_models/.../model.bin` 约 461MB，以及评分模型 `my_severity_combined.pkl`）由 **Git LFS** 托管。clone 前请先装 Git LFS，否则只会拉到文件指针（几 KB），无法得到真实模型内容：
+> ```bash
+> # 安装后
+> git lfs install
+> git clone https://github.com/anappleaday01/speech-cognitive-impairment-detection.git
+> # 若已用普通 git clone，补拉大文件：
+> cd speech-cognitive-impairment-detection && git lfs pull
+> ```
+
 ## 训练数据与模型
 
 **数据（C1 中文画述）**：iFLYTEK 2019 AD 语音数据集（`lzy1012/Alzheimer-s-disease-datasets`），中文母语者做「图片描述」任务，含 **CTRL（健康）/ MCI（轻度）/ AD（痴呆）** 三组，训练样本 **323 人**。
