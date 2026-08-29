@@ -56,7 +56,7 @@ pip install -r requirements.txt   # 见该目录下 README
 python serve.py                    # http://127.0.0.1:8000
 ```
 
-### speech_mci_validation/（验证版，供协作者联调核对输入输出）
+### speech_mci_validation/（验证版）
 
 - **`c1_data/`** — C1 核心数据：`egemaps_final.csv`（88 维声学特征）、`2_final_list_train.csv`（标签+人口学）、`linguistic_features_full.csv`（语言学特征）、`transcripts_full/tsv2/*.tsv`（转写）。
 - **`test_c1.py`** — 联调脚本：从 C1 抽样，组装特征+转写调 `/score`，输出 `severity_0_100 + risk_band` 并对照真实标注，核对输出是否符合「CTRL 低分、障碍高分」。
