@@ -1,0 +1,56 @@
+# ---- 只纳入部署版 / 验证版两个目录 ----
+# 其余源仓库训练/实验内容一律不提交（训练在源仓库完成，部署包只含运行所需）
+
+# 系统/环境
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.workbuddy/
+
+# 源仓库脚本与实验目录（不纳入）
+ROUTE_A_swap_your_data.py
+route_a_holdout.py
+route_a_transfer.py
+route_a_transfer_fast.py
+route_a_export_holdout_io.py
+ab_acoustic_protocol.py
+ab_cogimpair.py
+ab_slim.py
+ab_tier3.py
+ab_tier3_variants.py
+ab_tongji_ablation.py
+ab_tongji_fs.py
+_diag2.py
+_diag3.py
+_diag_deploy.py
+_verify_new_pkl.py
+DEPLOY_CN_SEVERITY.md
+ROUTE_A_DELIVERY.md
+STATUS_TWO_PATHS.md
+requirements.txt
+
+# 源仓库数据/模型/实验目录（不纳入）
+feature_pipeline/
+CogniVoice/
+cognivoice_mmse_baseline/
+repro_cognivoice/
+reproduce/
+reproduce_demo/
+speech_cognitive_biomarker/
+route_a_outputs*/
+route_a_outputs_fast/
+route_a_outputs_holdout_fast/
+stanza_models/
+assets_bundle/
+*.tar.gz
+*.tgz
+
+# 大模型走 Git LFS（见 .gitattributes），不在此列
