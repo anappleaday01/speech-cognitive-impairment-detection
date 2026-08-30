@@ -133,6 +133,9 @@ body = 音频二进制流
   "uuid": "recording",
   "severity_0_100": 49.05,
   "risk_band": "MCI-like",
+  "evidence": "sufficient",
+  "ood_z": 0.8,
+  "saturated": false,
   "mode": "combined",
   "asr_backend": "faster-whisper"
 }
@@ -142,12 +145,16 @@ body = 音频二进制流
 |---|---|---|
 | `uuid` | string | 无后缀文件名（App 侧可忽略，需关联样本可自行覆盖） |
 | **`severity_0_100`** | float 0–100 | ⭐ 核心输出。越高=认知障碍越重。健康(CTRL)≈低分，认知障碍（MCI/AD）≈高分 |
-| `risk_band` | string | 风险带**三级判定**（方案A，无 AD-like）：`CTRL-like`（`<35`）/ `borderline`（`35–50`）/ `MCI-like`（`≥50`） |
+| `risk_band` | string | 风险带判定：`CTRL-like`（`<35`）/ `borderline`（`35–50`）/ `MCI-like`（`≥50`）；域外输入为 `无法判定` |
+| `evidence` | string | **证据充分性（新字段，App 建议展示）**：`sufficient`（分布内，分数可靠）/ `low_confidence`（轻度域外，分数保留但低置信，仅供排序）/ `无法判定`（极端域外，分数无信息量，已拉向中性带） |
+| `ood_z` | float | 离训练分布的平均 \|z\| 距离，越大越不可信（仅供排查） |
+| `saturated` | bool | 决策值是否钉在 0/100 端点（仅供排查） |
 | `mode` | string | 恒为 `combined`（声学+语言学都用上了）；若转写为空降级为 `combined_imputed` |
 | `asr_backend` | string | 实际转写后端：`faster-whisper` 或 `transformers`，仅供排查 |
 
 > **App 主读 `severity_0_100`（连续分，直接用于排序/初筛）；`risk_band` 只是该分值按切点（35/50）的便捷分档：`<35`→CTRL-like、`35–50`→borderline、`≥50`→MCI-like。**
 > **建议 App 语义**：`CTRL-like` 直接低风险；`borderline` 提示"需复测/随访"；`MCI-like` 提示"疑似认知障碍，建议转诊"。`borderline` 与 `MCI-like` 均建议引起关注/进一步检查。
+> **evidence 处理建议**：`sufficient` 正常使用分数；`low_confidence` 分数仅作参考、建议复测标准画述录音；`无法判定` 不要对外输出精确分数，提示"录音不符合标准（太短/噪声/非画述任务），请按规范重录"。
 
 ### 错误码
 
@@ -293,12 +300,14 @@ curl -F "file=@big_sample.wav" \
 ```bash
 curl -s -X POST "http://127.0.0.1:8000/score_audio?sex=F&age=72&education=9" \
      -H "Content-Type: audio/wav" --data-binary @19.wav | python -m json.tool
-# 参考（v20260830 版本）： severity_0_100 ≈ 37.06， risk_band = borderline
+# 参考（v20260831 版本，02010001/19.wav 属非标准短录音）：
+#   severity_0_100 ≈ 42.5，risk_band = 无法判定，evidence = 无法判定
 ```
 
-- 如果还是 `42.9376`：说明还在用旧版 `my_severity_combined.pkl` / `stanza_models/` 没拉下来。
+- 如果 `severity_0_100 = 42.9376`（三个样本都一样）且**没有** `evidence` 字段：说明还在用旧版 `my_severity_combined.pkl` / 旧 `cn_scorer.py` 没拉下来。
   - 先 `git lfs pull` 再 `ls -lh speech_mci_detection/my_severity_combined.pkl`（应该是 500+KB 实际文件，不是 100 字节指针）。
   - 再确认 `speech_mci_detection/stanza_models/zh-hans/` 下至少有 `tokenize / pos / lemma / depparse / pretrain / backward_charlm / forward_charlm` 7 个目录，否则 stanza 会降级 → 16 列依存回退到训练均值 → 分数会偏到均值。
+- **对照验证用 C1 标准画述音频**：`speech_mci_validation/c1_data/` 里任意一段（如 `P0001_0017.tsv` 对应录音），应返回 `evidence=sufficient` 且有真实梯度分数；短/噪声/非画述录音才会出现 `low_confidence` 或 `无法判定`。
 - 如果返回 HTTP 413：按 6.3 改 Nginx（和改模型不是一回事，必须分别做）。
 
 ---
@@ -307,4 +316,5 @@ curl -s -X POST "http://127.0.0.1:8000/score_audio?sex=F&age=72&education=9" \
 
 | Tag | 日期 | 关键变更 | 协作者动作 |
 |---|---|---|---|
+| `deploy-v20260831` | 2026-08-31 | ✅ **模型换逻辑回归（RBF→LR）**：分布外输入不再塌缩成常数，任意输入都有梯度分数；10 折 CV AUC（CTRL vs 障碍）≈0.82。✅ **新增证据分级（evidence 字段）**：`sufficient`（分布内，分数可靠）/ `low_confidence`（轻度域外，保留分数+风险带但低置信）/ `无法判定`（极端域外，分数拉回中性带 42.5、风险带=无法判定）——解决域外短音频输出 0.0/100.0 被误读为确定健康/障碍的问题。响应新增 `evidence`/`ood_z`/`saturated` 字段。**部署版与训练版 `cn_scorer.py` 同步更新。** | `git checkout deploy-v20260831 && git lfs pull` + 重启服务（无需重新 pip install） |
 | `deploy-v20260830` | 2026-08-30 | ✅ **修复 severity 恒=42.9376 的双重根因**：① 打包 stanza 离线模型（`stanza_models/zh-hans`，544MB），句法 16 列真正启用；② 重训 96 维 combined 模型，两边界 SimpleImputer.statistics_ 不再有 80-95 全 NaN，不同音频分数开始分化（实测 02.wav 37.05 / 19.wav 37.06）。10 折 CV AUC（重训版）：HC-MCI 0.735 / MCI-AD 0.605 / HC-AD 0.832。新增 `stanza>=1.8` 依赖。**⚠️ 服务器需按 §6.3 单独改 Nginx `client_max_body_size 50m`，否则 ≥1MB 音频仍然 413，与模型算法无关。** | `git checkout deploy-v20260830 && git lfs pull && pip install -r speech_mci_detection/requirements.txt` + 重启服务；**并按 §6.3 改 Nginx**。 |

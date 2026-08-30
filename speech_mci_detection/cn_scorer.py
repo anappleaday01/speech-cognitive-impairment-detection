@@ -25,7 +25,7 @@ import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,7 +47,10 @@ class CognitiveScorer:
             ("imp", SimpleImputer(strategy="mean")),
             ("sc", StandardScaler()),
             # 不使用 probability=True: 弱信号上 Platt 校准会把排名校准反 (实测 AUC 0.32)。
-            ("svc", SVC(C=C, class_weight="balanced", random_state=random_state)),
+            # 逻辑回归（linear logit）: 线性组合决策，对分布外输入不饱和，
+            # 任意输入都能给出有梯度的 0-100 分（原 RBF SVC 对 OOD 输入会塌缩到常数）。
+            ("svc", LogisticRegression(C=C, class_weight="balanced",
+                                       random_state=random_state, max_iter=20000)),
         ])
         self.feature_cols_ = None
         self.d_lo_ = None   # 训练集 decision_function 下界 -> 风险 0
@@ -80,6 +83,19 @@ class CognitiveScorer:
         if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
             lo, hi = float(d.min()), float(d.max())
         self.d_lo_, self.d_hi_ = float(lo), float(hi)
+        # ---- OOD / 证据检测基线（供 serve 标注"证据不足"）----
+        # 用 StandardScaler 把训练特征转到 z 空间，记每样本平均 |z|，取 98% 分位为阈值。
+        # 推理时输入若离训练分布太远（不同任务/短音频/异常声学），mean|z| 显著偏大
+        # -> evidence=insufficient，分数为低置信域外输出，不作为精确诊断。
+        try:
+            Z = self.pipe.named_steps["sc"].transform(
+                self.pipe.named_steps["imp"].transform(np.asarray(X, dtype=float)))
+            mz = np.nanmean(np.abs(Z), axis=1)
+            self.ood_mean_ = float(np.nanmean(mz))
+            self.ood_thr_ = float(np.nanpercentile(mz, 98))
+        except Exception:
+            self.ood_mean_ = 0.0
+            self.ood_thr_ = float("inf")
         return self
 
     # ---- 推理 ----
@@ -96,6 +112,28 @@ class CognitiveScorer:
         if hi is None or lo is None or hi == lo:
             return np.full_like(d, 50.0)
         return np.clip(100.0 * (d - lo) / (hi - lo), 0.0, 100.0)
+
+    def ood_z(self, X):
+        """每样本平均 |z|（scaled 空间）：离训练分布越远越大。"""
+        X = np.asarray(X, dtype=float)
+        imp = self.pipe.named_steps["imp"]
+        sc = self.pipe.named_steps["sc"]
+        Z = sc.transform(imp.transform(X))
+        return np.nanmean(np.abs(Z), axis=1).ravel()
+
+    def evidence(self, X):
+        """证据充分性检测。
+        ood_z：平均 |z|（离训练分布距离）；saturated：决策值是否钉在 0/100 端点；
+        evidence：'sufficient'（分布内，分数可靠）/ 'insufficient'（分布外，低置信）。"""
+        X = np.asarray(X, dtype=float)
+        z = self.ood_z(X)
+        d = self.decision(X)
+        lo, hi = self.d_lo_, self.d_hi_
+        risk = np.clip(100.0 * (d - lo) / (hi - lo), 0.0, 100.0)
+        saturated = (risk <= 0.0) | (risk >= 100.0)
+        thr = getattr(self, "ood_thr_", float("inf"))
+        insufficient = z > thr
+        return z, saturated, insufficient
 
     def score(self, X, uuids=None):
         """批量推理 -> DataFrame(decision + 0-100 风险评分 + 预测类别)。"""
@@ -168,6 +206,10 @@ class CognitiveScorer:
 # =====================================================================
 SEVERITY_MODEL_PATH = os.path.join(HERE, "cn_severity_scorer.pkl")
 
+# 灰色带（35–50）中心值：域外(evidence=insufficient)样本把 severity 回缩到这里，
+# 避免"溢出端点 0.0/100.0"被误读成确定的健康/障碍判定。
+NEUTRAL_SEVERITY = 42.5
+
 
 class CognitiveSeverityScorer:
     """MCI-centered 0-100 severity score.
@@ -205,18 +247,66 @@ class CognitiveSeverityScorer:
         r2 = self.b_dementia.risk_score(X)
         return 0.5 * r1 + 0.5 * r2
 
+    def evidence(self, X):
+        """组合两个边界的证据检测（任一边界域外即 insufficient）。
+        返回 (ood_z, saturated, evidence)。"""
+        X = np.asarray(X, dtype=float)
+        z1, sat1, ins1 = self.b_impaired.evidence(X)
+        z2, sat2, ins2 = self.b_dementia.evidence(X)
+        return (np.maximum(z1, z2), (sat1 | sat2),
+                np.where(ins1 | ins2, "insufficient", "sufficient"))
+
+    def _pull_ood(self, sev, ev, z1, z2):
+        """仅对"无法判定"(极端域外)样本按超出训练分布的程度把 severity 拉向
+        中性带中心，避免 0.0/100.0 端点被误读成确定的健康/障碍。
+        low_confidence(轻度域外)保留原始分数与风险带，只加低置信标注。
+        pull 权重：excess=(z−thr)/thr，excess≥2（离分布 2 倍阈值以上）即完全回缩。"""
+        sev = np.asarray(sev, dtype=float).copy()
+        ins = np.asarray(ev) == "无法判定"
+        if not ins.any():
+            return sev
+        thr1, thr2 = self.b_impaired.ood_thr_, self.b_dementia.ood_thr_
+        for i in np.nonzero(ins)[0]:
+            exc = 0.0
+            if np.isfinite(thr1) and thr1 > 0:
+                exc = max(exc, (z1[i] - thr1) / thr1)
+            if np.isfinite(thr2) and thr2 > 0:
+                exc = max(exc, (z2[i] - thr2) / thr2)
+            pull = float(np.clip(exc / 2.0, 0.0, 1.0))
+            sev[i] = sev[i] + (NEUTRAL_SEVERITY - sev[i]) * pull
+        return sev
+
     def score(self, X, uuids=None):
         X = np.asarray(X, dtype=float)
         sev = self.severity(X)
-        # 三级风险带（方案A：不确定带）：
-        #   <35            → CTRL-like   （低风险，大概率健康）
-        #   35 ≤ value <50 → borderline  （灰色带，建议复测/随访）
-        #   ≥50            → MCI-like    （高风险，疑似认知障碍，转诊）
-        # 边界 35/50 取自全量 OOF 分布（健康中位34.7 / 障碍中位54.7，两组重叠→用灰色带缓冲）。
-        band = np.where(
-            sev < 35.0, "CTRL-like",
-            np.where(sev < 50.0, "borderline", "MCI-like"))
+        z1, sat1, ins1 = self.b_impaired.evidence(X)
+        z2, sat2, ins2 = self.b_dementia.evidence(X)
+        z = np.maximum(z1, z2)
+        sat = sat1 | sat2
+        # 分级证据: sufficient(分布内, 分数可靠) / low_confidence(轻度域外,
+        # 保留分数+风险带但低置信) / 无法判定(极端域外, 分数无信息量)。
+        # 判据: exc=(z−thr)/thr(取两边界较大者), exc≥2 即完全回缩、直接"无法判定"。
+        thr1, thr2 = self.b_impaired.ood_thr_, self.b_dementia.ood_thr_
+        ev = np.full(len(z), "sufficient", dtype=object)
+        for i in range(len(z)):
+            if not (ins1[i] or ins2[i]):
+                continue
+            exc = 0.0
+            if np.isfinite(thr1) and thr1 > 0:
+                exc = max(exc, (z1[i] - thr1) / thr1)
+            if np.isfinite(thr2) and thr2 > 0:
+                exc = max(exc, (z2[i] - thr2) / thr2)
+            ev[i] = "无法判定" if exc >= 2.0 else "low_confidence"
+        # 仅"无法判定"(极端域外)向中性带回缩(去掉端点误导)；
+        # low_confidence(轻度域外)保留原始分数与真实风险带，只加低置信标注。
+        sev = self._pull_ood(sev, ev, z1, z2)
+        band = np.where(ev == "无法判定", "无法判定",
+                        np.where(sev < 35.0, "CTRL-like",
+                                 np.where(sev < 50.0, "borderline", "MCI-like")))
         out = pd.DataFrame({"severity_0_100": sev, "risk_band": band})
+        out["ood_z"] = z
+        out["saturated"] = sat
+        out["evidence"] = ev
         if uuids is not None:
             out.insert(0, "uuid", list(uuids))
         return out
