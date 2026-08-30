@@ -32,10 +32,17 @@ _diag2.py
 _diag3.py
 _diag_deploy.py
 _verify_new_pkl.py
+_diag_AB.py
+_diag_ling.py
+_verify_fix.py
+compare_02010001.py
+compare_server_local.py
+smoke_c1_batch.py
 DEPLOY_CN_SEVERITY.md
 ROUTE_A_DELIVERY.md
 STATUS_TWO_PATHS.md
-requirements.txt
+# 仅忽略仓库根的 requirements.txt（源训练目录那份），不要忽略子目录（部署包的 requirements.txt 必须入库）
+/requirements.txt
 
 # 源仓库数据/模型/实验目录（不纳入）
 feature_pipeline/
@@ -48,7 +55,9 @@ speech_cognitive_biomarker/
 route_a_outputs*/
 route_a_outputs_fast/
 route_a_outputs_holdout_fast/
-stanza_models/
+# 仅忽略仓库根的 stanza_models/（源机器全局 stanza 缓存或另一个打包目录），
+# 不要忽略部署包 speech_mci_detection/stanza_models/——它是离线推理必需的 96 维依存特征模型。
+/stanza_models/
 assets_bundle/
 *.tar.gz
 *.tgz

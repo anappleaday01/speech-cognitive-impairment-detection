@@ -43,49 +43,49 @@ import pandas as pd
 HERE = os.path.dirname(os.path.abspath(__file__))
 BACKEND = "unknown"  # 运行后会被设为 "stanza" / "jieba" / "empty"
 
+# ---------- stanza offline bundle 声明 ----------
+# 项目内预置的 stanza 模型根（打包迁移服务器时可直接携带，离线加载，无需联网）
+_MODEL_ROOT = os.path.join(HERE, "stanza_models")
+# 关键：STANZA_RESOURCES_DIR 在 `import stanza` 时被读取（stanza/resources/common.py 顶部）
+# 所以必须【先设环境变量、再 import stanza】，否则它仍指向用户缓存目录而不是项目内模型。
+# 这里直接在模块 import 阶段就写入 os.environ，是唯一能保证 100% 生效的时机。
+if os.path.isdir(os.path.join(_MODEL_ROOT, "zh-hans")):
+    os.environ.setdefault("STANZA_RESOURCES_DIR", _MODEL_ROOT)
+
 # ---------- stanza lazy import ----------
 _NLP = None
 _STANZA_TRIED = False
 
-# 项目内预置的 stanza 模型根（打包迁移服务器时可直接携带，离线加载，无需联网）
-_MODEL_ROOT = os.path.join(HERE, "stanza_models")
-
 def _get_stanza_nlp():
     """懒加载 stanza-zh；失败返回 None（不抛异常）。三种情形：
-    ① 项目内 stanza_models/ 自带 zh-hans → 纯离线加载（download_method=NONE，
-       绝不联网；模型缺失/不完整只会快速失败并回退 jieba，绝不在服务器上联网卡死超时）。
+    ① 项目内 stanza_models/zh-hans 存在 → 纯离线加载（显式 model_dir +
+       download_method=NONE，绝不联网；模型缺失只会快速失败并回退 jieba，
+       绝不在服务器上联网卡死超时）。
     ② 无项目内模型且能联网 → 自动下载后再加载。
     ③ 都不可用 → 返回 None（上层走 jieba / 空降级）。
-
-    注意：不要用任何自定义的“禁网”环境变量 —— stanza 识别的是
-    download_method=DownloadMethod.NONE（比 REUSE_RESOURCES 更严格，App 内完全离线）。
     """
     global _NLP, _STANZA_TRIED, BACKEND
     if _STANZA_TRIED:
         return _NLP
     _STANZA_TRIED = True
-    # 关键：STANZA_RESOURCES_DIR 在 import stanza 时被读取（stanza/resources/common.py 顶部），
-    # 所以必须【先设环境变量、再 import stanza】，否则它仍指向用户缓存目录而不是项目内模型。
     offline_bundle = os.path.isdir(os.path.join(_MODEL_ROOT, "zh-hans"))
     # A/B 对照开关：EXTRACT_SYNTAX_BACKEND=jieba / stanza / auto（默认 auto，能装就用 stanza）
     forced = os.environ.get("EXTRACT_SYNTAX_BACKEND", "auto").strip().lower()
     if forced == "jieba":
         return None  # 强制 jieba 后端（不计 stanza）
-    if offline_bundle:
-        os.environ["STANZA_RESOURCES_DIR"] = _MODEL_ROOT
     try:
         import stanza
         from stanza.pipeline.core import DownloadMethod
     except Exception:
         return None
-    if forced == "stanza" and not offline_bundle:
-        # 明确要求 stanza 但项目内无模型 → 走联网下载
-        pass
     if offline_bundle:
-        # 项目内置模型根 → 纯离线加载，禁止触网
+        # 项目内置模型根 → 纯离线加载，禁止触网。
+        # 双保险：os.environ 模块级已设 + 显式传 model_dir，彻底避免 stanza 读错缓存目录。
         try:
             _NLP = stanza.Pipeline(
                 lang='zh-hans',
+                dir=_MODEL_ROOT,
+                model_dir=_MODEL_ROOT,
                 processors='tokenize,pos,lemma,depparse',
                 download_method=DownloadMethod.NONE,
                 verbose=False,
@@ -97,18 +97,21 @@ def _get_stanza_nlp():
             print(f"[extract_syntax_proposition] stanza_models/zh-hans 加载失败，"
                   f"自动降级 jieba 后端：{type(e).__name__}: {e}")
             return None
-    # 无项目内模型 → 走联网下载（仅当服务器可达外网时生效）
-    try:
-        stanza.download('zh-hans', processors='tokenize,pos,lemma,depparse', verbose=False)
-        _NLP = stanza.Pipeline(
-            lang='zh-hans',
-            processors='tokenize,pos,lemma,depparse',
-            verbose=False,
-        )
-        BACKEND = "stanza"
-        return _NLP
-    except Exception:
-        return None
+    if forced == "stanza":
+        # 明确要求 stanza 且项目内无模型 → 走联网下载
+        try:
+            stanza.download('zh-hans', processors='tokenize,pos,lemma,depparse', verbose=False)
+            _NLP = stanza.Pipeline(
+                lang='zh-hans',
+                processors='tokenize,pos,lemma,depparse',
+                verbose=False,
+            )
+            BACKEND = "stanza"
+            return _NLP
+        except Exception:
+            return None
+    # 默认回退：无项目内模型，也没强制 stanza → 直接返回 None，由上层走 jieba，不触发联网下载
+    return None
 
 # ---------- jieba lazy import (fallback POS tokenizer) ----------
 _JIEBA_POSSEG = None

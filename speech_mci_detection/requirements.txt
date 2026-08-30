@@ -1,0 +1,11 @@
+numpy>=1.26
+pandas>=2.2
+scikit-learn>=1.5
+jieba>=0.42.1
+openpyxl>=3.1       # 读 SUBTLEX-CH-WF.xlsx / AoA/Conc/Fami 词典
+stanza>=1.8         # 依存句法 16 列精确计算（自带 stanza_models/zh-hans 离线模型，不联网）
+
+# ↓ 只有在启用 /score_audio（音频端到端）时才需要。纯用 /score（批量传特征）可不装 ↓
+opensmile>=2.5
+faster-whisper>=1.0
+soundfile>=0.12

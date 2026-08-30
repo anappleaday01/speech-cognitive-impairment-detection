@@ -1,3 +1,6 @@
-# Git LFS 追踪的大文件（超过 GitHub 100MB 上限者，如 whisper 模型 / pkl 模型）
+# Git LFS 追踪的大文件（超过 GitHub 100MB 上限者，如 whisper 模型 / pkl 模型 / stanza 中文模型）
 *.pkl filter=lfs diff=lfs merge=lfs -text
 *.bin filter=lfs diff=lfs merge=lfs -text
+
+# stanza-zh 离线模型权重（pretrain ~292MB / depparse ~129MB / charlm 各 ~41MB）
+speech_mci_detection/stanza_models/**/*.pt filter=lfs diff=lfs merge=lfs -text
