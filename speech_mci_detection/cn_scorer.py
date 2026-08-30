@@ -256,25 +256,28 @@ class CognitiveSeverityScorer:
         return (np.maximum(z1, z2), (sat1 | sat2),
                 np.where(ins1 | ins2, "insufficient", "sufficient"))
 
-    def _pull_ood(self, sev, ev, z1, z2):
-        """仅对"无法判定"(极端域外)样本按超出训练分布的程度把 severity 拉向
-        中性带中心，避免 0.0/100.0 端点被误读成确定的健康/障碍。
-        low_confidence(轻度域外)保留原始分数与风险带，只加低置信标注。
-        pull 权重：excess=(z−thr)/thr，excess≥2（离分布 2 倍阈值以上）即完全回缩。"""
-        sev = np.asarray(sev, dtype=float).copy()
-        ins = np.asarray(ev) == "无法判定"
-        if not ins.any():
-            return sev
-        thr1, thr2 = self.b_impaired.ood_thr_, self.b_dementia.ood_thr_
-        for i in np.nonzero(ins)[0]:
-            exc = 0.0
-            if np.isfinite(thr1) and thr1 > 0:
-                exc = max(exc, (z1[i] - thr1) / thr1)
-            if np.isfinite(thr2) and thr2 > 0:
-                exc = max(exc, (z2[i] - thr2) / thr2)
-            pull = float(np.clip(exc / 2.0, 0.0, 1.0))
-            sev[i] = sev[i] + (NEUTRAL_SEVERITY - sev[i]) * pull
-        return sev
+    def _ling_mask(self):
+        """bool 掩码: combined_feature_cols_ 中属于语言学(ling) 的列位置。
+        假定 score 的 X 列顺序 == combined_feature_cols_ 顺序（serve.py assemble_combined_X 保证）。"""
+        cf = getattr(self, "combined_feature_cols_", None)
+        lc = getattr(self, "ling_cols_", None)
+        if cf is None or lc is None:
+            return None
+        lc = set(lc)
+        return np.array([c in lc for c in cf])
+
+    def _acoustic_fallback(self, X):
+        """声学回退分：语言特征置 NaN(→填训练均值)后重打分，分数仅反映声学/人口学信号。
+        用于"无法判定"样本——其语言特征已失真（英文/非画述文本把完整模型分数饱和压到
+        0/100 端点），完整模型分数无信息量。返回与 X 等长的 severity 数组；
+        无法计算列掩码时退回中性带中心（原回缩行为）。"""
+        X = np.asarray(X, dtype=float)
+        mask = self._ling_mask()
+        if mask is None or mask.sum() == 0:
+            return np.full(X.shape[0], NEUTRAL_SEVERITY, dtype=float)
+        Xa = X.copy()
+        Xa[:, mask] = np.nan
+        return np.asarray(self.severity(Xa), dtype=float).ravel()
 
     def score(self, X, uuids=None):
         X = np.asarray(X, dtype=float)
@@ -284,8 +287,8 @@ class CognitiveSeverityScorer:
         z = np.maximum(z1, z2)
         sat = sat1 | sat2
         # 分级证据: sufficient(分布内, 分数可靠) / low_confidence(轻度域外,
-        # 保留分数+风险带但低置信) / 无法判定(极端域外, 分数无信息量)。
-        # 判据: exc=(z−thr)/thr(取两边界较大者), exc≥2 即完全回缩、直接"无法判定"。
+        # 保留分数+风险带但低置信) / 无法判定(极端域外, 语言内容不适用)。
+        # 判据: exc=(z−thr)/thr(取两边界较大者), exc≥2 即"无法判定"。
         thr1, thr2 = self.b_impaired.ood_thr_, self.b_dementia.ood_thr_
         ev = np.full(len(z), "sufficient", dtype=object)
         for i in range(len(z)):
@@ -297,12 +300,18 @@ class CognitiveSeverityScorer:
             if np.isfinite(thr2) and thr2 > 0:
                 exc = max(exc, (z2[i] - thr2) / thr2)
             ev[i] = "无法判定" if exc >= 2.0 else "low_confidence"
-        # 仅"无法判定"(极端域外)向中性带回缩(去掉端点误导)；
-        # low_confidence(轻度域外)保留原始分数与真实风险带，只加低置信标注。
-        sev = self._pull_ood(sev, ev, z1, z2)
-        band = np.where(ev == "无法判定", "无法判定",
-                        np.where(sev < 35.0, "CTRL-like",
-                                 np.where(sev < 50.0, "borderline", "MCI-like")))
+        # 无法判定(极端域外): 语言特征已失真, 完整模型分数被压到端点、无信息量。
+        # 改用声学回退分(语言特征视为缺失→填训练均值)提供有区分度的参考值,
+        # evidence 标注 acoustic_only（仅声学，低置信）；low_confidence 保留原始分。
+        undet = np.asarray(ev) == "无法判定"
+        if undet.any():
+            try:
+                sev[undet] = self._acoustic_fallback(X)[undet]
+                ev[undet] = "acoustic_only"
+            except Exception:
+                sev[undet] = NEUTRAL_SEVERITY
+        band = np.where(sev < 35.0, "CTRL-like",
+                        np.where(sev < 50.0, "borderline", "MCI-like"))
         out = pd.DataFrame({"severity_0_100": sev, "risk_band": band})
         out["ood_z"] = z
         out["saturated"] = sat
