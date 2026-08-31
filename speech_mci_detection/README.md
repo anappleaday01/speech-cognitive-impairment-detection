@@ -155,7 +155,7 @@ body = 音频二进制流
 | `uuid`               | string      | 无后缀文件名（App 侧可忽略，需关联样本可自行覆盖）                                                                                      |
 | **`severity_0_100`** | float 0–100 | ⭐ 核心输出。越高=认知障碍越重。健康(CTRL)≈低分，认知障碍（MCI/AD）≈高分                                                                     |
 | `risk_band`          | string      | 风险带判定：`CTRL-like`（`<35`）/ `borderline`（`35–50`）/ `MCI-like`（`≥50`）                                               |
-| `evidence`           | string      | **证据充分性（新字段，App 建议展示）**：`sufficient`（分布内，分数可靠）/ `low_confidence`（轻度域外，分数保留但低置信，仅供排序）/ `无法判定`（极端域外，分数无信息量，已拉向中性带） |
+| `evidence`           | string      | **证据充分性（新字段，App 建议展示）**：`sufficient`（分布内，分数可靠）/ `low_confidence`（轻度域外，分数未饱和时保留、但低置信）/ `acoustic_only`（域外或分数饱和端点，仅声学信号重打分，低置信） |
 | `ood_z`              | float       | 离训练分布的平均 \|z\| 距离，越大越不可信（仅供排查）                                                                                   |
 | `saturated`          | bool        | 决策值是否钉在 0/100 端点（仅供排查）                                                                                           |
 | `mode`               | string      | 恒为 `combined`（声学+语言学都用上了）；若转写为空降级为 `combined_imputed`                                                            |

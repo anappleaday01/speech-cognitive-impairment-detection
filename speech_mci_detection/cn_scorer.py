@@ -300,16 +300,30 @@ class CognitiveSeverityScorer:
             if np.isfinite(thr2) and thr2 > 0:
                 exc = max(exc, (z2[i] - thr2) / thr2)
             ev[i] = "无法判定" if exc >= 2.0 else "low_confidence"
-        # 无法判定(极端域外): 语言特征已失真, 完整模型分数被压到端点、无信息量。
-        # 改用声学回退分(语言特征视为缺失→填训练均值)提供有区分度的参考值,
-        # evidence 标注 acoustic_only（仅声学，低置信）；low_confidence 保留原始分。
-        undet = np.asarray(ev) == "无法判定"
-        if undet.any():
+        # 触发声学回退的两类样本（完整模型分均无信息量）：
+        #  1) 极端域外 (ev=无法判定, exc≥2)：语言内容失真，完整分被压到端点。
+        #  2) low_confidence 且完整分饱和在端点 (saturated)：分被 clip 钉在
+        #     0.0/100.0，会被误读成"确定健康/障碍"，同样无信息量。
+        # 均改用声学回退分（语言特征视为缺失→填训练均值），evidence 标注 acoustic_only。
+        # 回退分仍饱和端点(0.0/100.0)的极端样本：声学信号本身也极端偏离训练分布，
+        # 拉向中性带中心，避免 0.0/100.0 端点被误读为确定性判定。
+        ev = np.asarray(ev)
+        undet = ev == "无法判定"
+        sat_low = (ev == "low_confidence") & sat
+        to_fb = undet | sat_low
+        if to_fb.any():
             try:
-                sev[undet] = self._acoustic_fallback(X)[undet]
+                fb = self._acoustic_fallback(X)
+                # 回退分是两边界 risk 的平均，可能落在 (0,1] 这种"≈0 而非恰好 0"的
+                # 极小值（如 0.1153/0.0646），显示仍是 0.0、会被误读为"确定健康"。
+                # 故用 ≤1.0 而非 ==0.0 判定低端饱和；高端饱和仍为 >=100.0。
+                edge = (fb <= 1.0) | (fb >= 100.0)
+                fb = np.where(edge, NEUTRAL_SEVERITY, fb)
+                sev[to_fb] = fb[to_fb]
                 ev[undet] = "acoustic_only"
+                ev[sat_low] = "acoustic_only"
             except Exception:
-                sev[undet] = NEUTRAL_SEVERITY
+                sev[to_fb] = NEUTRAL_SEVERITY
         band = np.where(sev < 35.0, "CTRL-like",
                         np.where(sev < 50.0, "borderline", "MCI-like"))
         out = pd.DataFrame({"severity_0_100": sev, "risk_band": band})
