@@ -88,3 +88,4 @@ python test_c1.py --n 3 --port 8000   # 需先启动 speech_mci_detection/serve.
 
 - 部署版仅包含运行所需文件（模型、特征抽取器、词典常模），**不含训练数据**；`cn_scorer.build_cn_severity_combined_model` 为 stub，训练在源仓库完成，部署包直接加载 `my_severity_combined.pkl`。
 - 详细接口说明见 `speech_mci_detection/README.md`。
+- 部署/升级流程、服务端配置与各版本变更记录见 `speech_mci_detection/DEPLOY_GUIDE.md`。

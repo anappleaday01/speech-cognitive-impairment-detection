@@ -154,7 +154,7 @@ body = 音频二进制流
 | -------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- |
 | `uuid`               | string      | 无后缀文件名（App 侧可忽略，需关联样本可自行覆盖）                                                                                      |
 | **`severity_0_100`** | float 0–100 | ⭐ 核心输出。越高=认知障碍越重。健康(CTRL)≈低分，认知障碍（MCI/AD）≈高分                                                                     |
-| `risk_band`          | string      | 风险带判定：`CTRL-like`（`<35`）/ `borderline`（`35–50`）/ `MCI-like`（`≥50`）；域外输入为 `无法判定`                                  |
+| `risk_band`          | string      | 风险带判定：`CTRL-like`（`<35`）/ `borderline`（`35–50`）/ `MCI-like`（`≥50`）                                               |
 | `evidence`           | string      | **证据充分性（新字段，App 建议展示）**：`sufficient`（分布内，分数可靠）/ `low_confidence`（轻度域外，分数保留但低置信，仅供排序）/ `无法判定`（极端域外，分数无信息量，已拉向中性带） |
 | `ood_z`              | float       | 离训练分布的平均 \|z\| 距离，越大越不可信（仅供排查）                                                                                   |
 | `saturated`          | bool        | 决策值是否钉在 0/100 端点（仅供排查）                                                                                           |
@@ -163,7 +163,7 @@ body = 音频二进制流
 
 > **App 主读** **`severity_0_100`（连续分，直接用于排序/初筛）；`risk_band`** **只是该分值按切点（35/50）的便捷分档：`<35`→CTRL-like、`35–50`→borderline、`≥50`→MCI-like。**
 > **建议 App 语义**：`CTRL-like` 直接低风险；`borderline` 提示"需复测/随访"；`MCI-like` 提示"疑似认知障碍，建议转诊"。`borderline` 与 `MCI-like` 均建议引起关注/进一步检查。
-> **evidence 处理建议**：`sufficient` 正常使用分数；`low_confidence` 分数仅作参考、建议复测标准画述录音；`无法判定` 不要对外输出精确分数，提示"录音不符合标准（太短/噪声/非画述任务），请按规范重录"。
+> **evidence 处理建议**：`sufficient` 正常使用分数；`low_confidence` 分数仅作参考、建议复测标准画述录音；`acoustic_only` 分数仅反映声学信号、低置信，不建议对外输出精确分数，提示"录音不符合标准（太短/噪声/非画述任务），请按规范重录"。
 
 ### 错误码
 
@@ -230,111 +230,6 @@ CTRL vs 认知障碍（MCI+AD）AUC ≈ 0.77。详见验证包内 README。
 
 ***
 
-## 六、给协作者：修改部署版 / 升级模型 的标准流程
+## 六、部署与升级、版本记录
 
-> 目标：**不管你改的是模型权重、pipeline 代码、词典还是大文件，协作者只需要「git pull + reload 服务」两件事**，不用手动拷文件、不用再在服务器上联网下载任何模型。
-
-### 6.1 仓库版本管理约定（避免每次来回发补丁包）
-
-* **所有代码 / 配置 / 模型 / 词典 / 离线模型全部走 Git + Git LFS**（不允许把 .pkl / .bin / stanza 模型发微信/飞书附件）。
-
-  * 已在根 `.gitattributes` 里登记 LFS：`*.pkl`、`*.bin`、`speech_mci_detection/stanza_models/**/*.pt`。
-
-  * 克隆前先 `git lfs install`，不然拉到的是指针。
-
-* **交付用 tag**，每个稳定版都打 `deploy-vYYYYMMDD`（例 `deploy-v20260830`）。服务器端拉这个 tag，而不是 `main` HEAD，避免被实验 commit 干扰。
-
-* 服务器部署目录固定为 git worktree（或直接 git clone），**新模型不用手动替换**：
-
-```bash
-# 推荐：服务器上用 git 拉最新 tag，一步到位
-cd /opt/speech-mci
-git fetch --tags origin
-git checkout deploy-v20260830        # 切换到交付的稳定版
-git lfs pull                          # 确保大文件(pkl/bin/stanza模型)真实落地
-
-pip install -r speech_mci_detection/requirements.txt  # 新增 stanza 依赖时要再跑一次
-```
-
-### 6.2 三类常见修改 → 协作者分别要做什么
-
-| 修改类型                                            | 示例                                                   | 代码侧做什么                                                                     | 协作者部署侧做什么（仅此）                                                                                          |
-| ----------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **A. 换模型权重**                                    | 新训练了一版 `my_severity_combined.pkl`                    | 直接覆盖 `speech_mci_detection/my_severity_combined.pkl`，commit → 打 tag → push | `git checkout <新tag>` + `git lfs pull` → 重启服务                                                          |
-| **B. 改推理代码**（特征组装 / ASR / 词典常模）                 | 新增 stanza 离线模型、修复 assemble\_combined\_X 列、加 jieba 降级 | 修改对应 `.py` / `*.csv` / `stanza_models/`，commit → 打 tag → push              | `git checkout <新tag>` + `git lfs pull` → `pip install -r speech_mci_detection/requirements.txt` → 重启服务 |
-| **C. 改服务配置**（Nginx 上传上限 / systemd / uwsgi / 端口） | 音频 >1MB 返回 HTTP 413、超时                               | 修改服务器本机 Nginx/systemd（不进 git，见 6.3）                                        | 本机 nginx -t && systemctl reload nginx                                                                  |
-
-### 6.3 服务端修复 HTTP 413（音频 >1MB 被 Nginx 挡）—— 两种场景一行改完
-
-场景①：**Nginx 反代** **`serve.py:8000`（最常见，即当前 60.204.175.59 的部署方式）**。
-打开 `/etc/nginx/conf.d/speech_mci.conf`（或 `/etc/nginx/sites-enabled/...`）里反代 modelserver / `8000` 的那个 `server`/`location`，加三行：
-
-```nginx
-server {
-    listen 80;
-    server_name 60.204.175.59 your-domain.com;
-
-    # 1) 客户端上传体积：放开到 50MB（单条录音 10 分钟 ~10MB 足够余量，避免真大数据把后端打挂）
-    client_max_body_size 50m;
-    # 2) 反代 buffer 放开一点，长音频不被拆
-    client_body_buffer_size 16m;
-    # 3) 反代超时：openSMILE + Whisper 一段 10MB wav 在 2c4g 机器约 10~30s，给 120s 兜底
-    proxy_read_timeout 120s;
-    proxy_send_timeout 120s;
-
-    location /modelserver/ {
-        proxy_pass http://127.0.0.1:8000/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_request_buffering off;   # 更快：音频一到就写后端 tmp，不塞 Nginx 内存
-    }
-}
-```
-
-改完：
-
-```bash
-sudo nginx -t                          # 配置对不对，先 dry-run（不要跳过）
-sudo systemctl reload nginx            # 热加载，不中断已连接
-curl -F "file=@big_sample.wav" \
-  "http://60.204.175.59/modelserver/v1/models/speech-cognitive-score-v1:upload-and-infer"
-# HTTP 200 + JSON，说明 413 修好了
-```
-
-> 华为云/阿里云若前面还有 WAF / API 网关（例如 APIG / ELB），**Nginx 改完还是 413** 就需要在控制台把网关的「客户端请求体最大长度」也改到 50MB（默认经常是 1–2MB）。
-
-场景②：直接裸跑 `python serve.py`（没 Nginx）。
-根本不会遇到 413，只要 Python 后端 `uvicorn`/`fastapi` 启动参数没配 `--limit-max-request-size` 就行（serve.py 默认没有限制，用的 starlette 默认 1GB max body，够用）。
-
-### 6.4 一条命令验证「升级完是不是真的生效」
-
-协作者每次 git pull + 重启服务后，用同一段已验证过的音频（比如 `02010001/19.wav`）本地 curl 打一次，和交付说明里的参考分对照：
-
-```bash
-curl -s -X POST "http://127.0.0.1:8000/score_audio?sex=F&age=72&education=9" \
-     -H "Content-Type: audio/wav" --data-binary @19.wav | python -m json.tool
-# 参考（v20260831 版本，02010001/19.wav 属非标准短录音）：
-#   severity_0_100 ≈ 42.5，risk_band = 无法判定，evidence = 无法判定
-```
-
-* 如果 `severity_0_100 = 42.9376`（三个样本都一样）且**没有** `evidence` 字段：说明还在用旧版 `my_severity_combined.pkl` / 旧 `cn_scorer.py` 没拉下来。
-
-  * 先 `git lfs pull` 再 `ls -lh speech_mci_detection/my_severity_combined.pkl`（应该是 500+KB 实际文件，不是 100 字节指针）。
-
-  * 再确认 `speech_mci_detection/stanza_models/zh-hans/` 下至少有 `tokenize / pos / lemma / depparse / pretrain / backward_charlm / forward_charlm` 7 个目录，否则 stanza 会降级 → 16 列依存回退到训练均值 → 分数会偏到均值。
-
-* **对照验证用 C1 标准画述音频**：`speech_mci_validation/c1_data/` 里任意一段（如 `P0001_0017.tsv` 对应录音），应返回 `evidence=sufficient` 且有真实梯度分数；短/噪声/非画述录音才会出现 `low_confidence` 或 `无法判定`。
-
-* 如果返回 HTTP 413：按 6.3 改 Nginx（和改模型不是一回事，必须分别做）。
-
-***
-
-## 七、版本记录（协作者一眼看到要不要升级）
-
-| Tag                | 日期         | 关键变更                                                                                                                                                                                                                                                                                                                                                                              | 协作者动作                                                                                                                               |
-| ------------------ | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `deploy-v20260901` | 2026-08-31 | ✅ **`无法判定`（极端域外）改为声学回退打分**：不再笼统拉回中性带 42.5。`score()` 把语言特征置为缺失（填训练均值）后仅用声学+人口学信号重打分，`severity_0_100` 恢复真实梯度（实测 475→34.89 / 365→29.14 / 新录音92→1.03），`evidence=acoustic_only`、`risk_band` 正常三档；`low_confidence`/`sufficient` 行为不变，分布内分数与 AUC 不受影响。                                                                                                                                   | `git checkout deploy-v20260901 && git lfs pull` + 重启服务（无需重新 pip install）                                                            |
-| `deploy-v20260831` | 2026-08-31 | ✅ **模型换逻辑回归（RBF→LR）**：分布外输入不再塌缩成常数，任意输入都有梯度分数；10 折 CV AUC（CTRL vs 障碍）≈0.82。✅ **新增证据分级（evidence 字段）**：`sufficient`（分布内，分数可靠）/ `low_confidence`（轻度域外，保留分数+风险带但低置信）/ `无法判定`（极端域外，分数拉回中性带 42.5、风险带=无法判定）——解决域外短音频输出 0.0/100.0 被误读为确定健康/障碍的问题。响应新增 `evidence`/`ood_z`/`saturated` 字段。**部署版与训练版** **`cn_scorer.py`** **同步更新。**                                                          | `git checkout deploy-v20260831 && git lfs pull` + 重启服务（无需重新 pip install）                                                            |
-| `deploy-v20260830` | 2026-08-30 | ✅ **修复 severity 恒=42.9376 的双重根因**：① 打包 stanza 离线模型（`stanza_models/zh-hans`，544MB），句法 16 列真正启用；② 重训 96 维 combined 模型，两边界 SimpleImputer.statistics\_ 不再有 80-95 全 NaN，不同音频分数开始分化（实测 02.wav 37.05 / 19.wav 37.06）。10 折 CV AUC（重训版）：HC-MCI 0.735 / MCI-AD 0.605 / HC-AD 0.832。新增 `stanza>=1.8` 依赖。**⚠️ 服务器需按 §6.3 单独改 Nginx** **`client_max_body_size 50m`，否则 ≥1MB 音频仍然 413，与模型算法无关。** | `git checkout deploy-v20260830 && git lfs pull && pip install -r speech_mci_detection/requirements.txt` + 重启服务；**并按 §6.3 改 Nginx**。 |
-
+部署流程、升级动作、服务端配置（Nginx 上传上限等）与各版本变更记录，见 [DEPLOY\_GUIDE.md](./DEPLOY_GUIDE.md)。
