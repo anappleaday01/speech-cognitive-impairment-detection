@@ -33,6 +33,11 @@ MODEL_PATH = os.path.join(HERE, "cn_scorer.pkl")
 
 CLASSES = ["CTRL", "MCI", "AD"]   # ordinal: 0=健康,1=轻度,2=痴呆
 
+# 推理期特征截断上限（Winsorize）: 每个特征 clip 到训练分布 mean±k·std。
+# 分布内样本 |z|<k 不受影响；极端 OOD 单特征（如 F0 下降斜率 std 超 14~19σ）
+# 在线性加权里不再无限拉低决策值。旧 pkl 无 clip_k_ 属性时用此默认值。
+CLIP_K = 5.0
+
 
 class CognitiveScorer:
     """中文认知障碍风险 评分接口。
@@ -99,9 +104,28 @@ class CognitiveScorer:
         return self
 
     # ---- 推理 ----
+    def _scaled(self, X, clip=True):
+        """impute → (可选)按训练分布截断 → 标准化。
+        clip=True 时把每个特征截断到 mean±k·std（训练集 StandardScaler 统计量），
+        单个极端 OOD 特征（如 F0 下降斜率 std 超训练分布 14~19 个标准差）在 LR
+        线性加权里不再能无限拉低决策值；分布内样本 |z|<k 完全不受影响。
+        返回标准化后的 Z（与 fit 时 scaler 同空间）。"""
+        X = np.asarray(X, dtype=float)
+        imp = self.pipe.named_steps["imp"]
+        sc = self.pipe.named_steps["sc"]
+        Xi = imp.transform(X)
+        if clip:
+            k = getattr(self, "clip_k_", CLIP_K)
+            if k:  # None/0 → 不截断
+                lo = sc.mean_ - k * sc.scale_
+                hi = sc.mean_ + k * sc.scale_
+                Xi = np.clip(Xi, lo, hi)
+        return sc.transform(Xi)
+
     def decision(self, X):
         X = np.asarray(X, dtype=float)
-        d = np.asarray(self.pipe.decision_function(X))
+        Z = self._scaled(X, clip=True)
+        d = np.asarray(self.pipe.named_steps["svc"].decision_function(Z))
         d = d.ravel() if d.ndim > 1 else d
         return self.flip_ * d
 
@@ -114,12 +138,9 @@ class CognitiveScorer:
         return np.clip(100.0 * (d - lo) / (hi - lo), 0.0, 100.0)
 
     def ood_z(self, X):
-        """每样本平均 |z|（scaled 空间）：离训练分布越远越大。"""
-        X = np.asarray(X, dtype=float)
-        imp = self.pipe.named_steps["imp"]
-        sc = self.pipe.named_steps["sc"]
-        Z = sc.transform(imp.transform(X))
-        return np.nanmean(np.abs(Z), axis=1).ravel()
+        """每样本平均 |z|（scaled 空间）：离训练分布越远越大。
+        注意：用未截断的 z 计算，保留对极端 OOD 的检测灵敏度。"""
+        return np.nanmean(np.abs(self._scaled(X, clip=False)), axis=1).ravel()
 
     def evidence(self, X):
         """证据充分性检测。
