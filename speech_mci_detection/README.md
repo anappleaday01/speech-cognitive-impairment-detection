@@ -232,4 +232,4 @@ CTRL vs 认知障碍（MCI+AD）AUC ≈ 0.77。详见验证包内 README。
 
 ## 六、部署与升级、版本记录
 
-部署流程、升级动作、服务端配置（Nginx 上传上限等）与各版本变更记录，见 [DEPLOY\_GUIDE.md](./DEPLOY_GUIDE.md)。
+部署流程、升级动作与各版本变更记录，见 [DEPLOY\_GUIDE.md](./DEPLOY_GUIDE.md)。
